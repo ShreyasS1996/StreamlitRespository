@@ -5,27 +5,31 @@ from prophet import Prophet
 from prophet.plot import plot_plotly
 from datetime import datetime
 
-st.set_page_config(page_title="Local Analytics Dashboard", layout="wide")
+st.set_page_config(page_title="Analytics Dashboard", layout="wide")
 
-st.title("📊 Local Analytics Dashboard with Forecasting")
+st.title("📊 Analytics Dashboard with Forecasting")
 
 # File uploader
-uploaded_file = st.file_uploader("Upload your CSV or Excel file", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx"])
 
 if uploaded_file:
-    # Read file
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')
+    # Read the uploaded file
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        st.stop()
 
     st.subheader("🔍 Data Preview")
     st.dataframe(df.head())
 
-    # Filters
+    # Sidebar filters
     st.sidebar.header("🛠 Filters")
 
-    # Dropdown filters for categorical columns
+    # Categorical filters
     cat_cols = df.select_dtypes(include='object').columns.tolist()
     for col in cat_cols:
         unique_vals = df[col].dropna().unique().tolist()
@@ -50,8 +54,8 @@ if uploaded_file:
         start_date, end_date = st.sidebar.date_input("Select date range", [min_date, max_date])
         df = df[(df[date_col] >= pd.to_datetime(start_date)) & (df[date_col] <= pd.to_datetime(end_date))]
 
+    # Visualizations
     st.subheader("📈 Visualizations")
-
     numeric_cols = df.select_dtypes(include='number').columns.tolist()
 
     chart_type = st.selectbox("Choose chart type", ["Line Chart", "Bar Chart", "Pie Chart"])
@@ -75,21 +79,24 @@ if uploaded_file:
         fig = px.pie(pie_data, names=pie_col, values=pie_val, title=f"{pie_val} distribution by {pie_col}")
         st.plotly_chart(fig, use_container_width=True)
 
+    # Forecasting
     st.subheader("📊 Forecasting with Prophet")
-
     if date_cols and numeric_cols:
         forecast_col = st.selectbox("Select column to forecast", numeric_cols)
         forecast_df = df[[date_col, forecast_col]].dropna()
         forecast_df.columns = ['ds', 'y']
 
-        model = Prophet()
-        model.fit(forecast_df)
+        try:
+            model = Prophet()
+            model.fit(forecast_df)
 
-        future = model.make_future_dataframe(periods=30)
-        forecast = model.predict(future)
+            future = model.make_future_dataframe(periods=30)
+            forecast = model.predict(future)
 
-        fig_forecast = plot_plotly(model, forecast)
-        st.plotly_chart(fig_forecast, use_container_width=True)
+            fig_forecast = plot_plotly(model, forecast)
+            st.plotly_chart(fig_forecast, use_container_width=True)
+        except Exception as e:
+            st.error(f"Forecasting error: {e}")
 else:
     st.info("Please upload a CSV or Excel file to begin.")
 
