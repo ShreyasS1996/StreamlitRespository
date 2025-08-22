@@ -130,18 +130,52 @@ def box(df_long, x, y, title):
         st.dataframe(df_long)
 
 def heatmap_from_pivot(pivot, xname, yname, title):
+    """
+    Show a heatmap from a 2D pivot (rows=y, cols=x).
+    Plotly -> Altair -> table fallback.
+    """
     if BACKEND == "plotly":
-        fig = go.Figure(data=go.Heatmap(x=pivot.columns, y=pivot.index, z=pivot.values, colorbar_title="Value"))
+        fig = go.Figure(
+            data=go.Heatmap(
+                x=pivot.columns, y=pivot.index, z=pivot.values, colorbar_title="Value"
+            )
+        )
         fig.update_layout(xaxis_title=xname, yaxis_title=yname, title=title)
         st.plotly_chart(fig, use_container_width=True)
-    elif BACKEND == "altair":
-        dfp = pivot.reset_index().melt(id_vars=pivot.index.name, var_name=xname, value_name="val")
-        chart = alt.Chart(dfp).mark_rect().encode(x=xname, y=pivot.index.name, color="val:Q", tooltip=["val"]).properties(title=title)
-        st.altair_chart(chart, use_container_width=True)
-    else:
-        st.write(f"**{title}** (table fallback)")
-        st.dataframe(pivot)
+        return
 
+    if BACKEND == "altair":
+        # Ensure axes have names
+        y_index_name = pivot.index.name or yname
+        x_cols_name = pivot.columns.name or xname
+
+        # Melt to long format for Altair
+        df_long = (
+            pivot.copy()
+            .rename_axis(index=y_index_name, columns=x_cols_name)
+            .reset_index()
+            .melt(id_vars=y_index_name, var_name=xname, value_name="val")
+        )
+
+        import altair as alt  # safe: only imported if we’re in the Altair branch
+        chart = (
+            alt.Chart(df_long)
+            .mark_rect()
+            .encode(
+                x=alt.X(f"{xname}:Q", title=xname),
+                y=alt.Y(f"{y_index_name}:Q", title=yname),
+                color=alt.Color("val:Q", title="Value"),
+                tooltip=[xname, y_index_name, alt.Tooltip("val:Q", title="Value")],
+            )
+            .properties(title=title)
+        )
+        st.altair_chart(chart, use_container_width=True)
+        return
+
+    # builtin fallback
+    st.write(f"**{title}** (table fallback)")
+    st.dataframe(pivot)
+    
 # ----------------------- analysis helpers (NumPy regression) -----------------------
 def standardized_coefficients(df_, feature_cols, target_col):
     """
