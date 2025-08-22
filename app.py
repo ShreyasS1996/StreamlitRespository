@@ -1,9 +1,8 @@
-import io
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Try Plotly (preferred); if not present, use Altair fallback
+# ------- Optional viz backends (Plotly preferred; fallback Altair) -------
 PLOTLY_OK = True
 try:
     import plotly.express as px
@@ -12,9 +11,14 @@ except Exception:
     PLOTLY_OK = False
     import altair as alt
 
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.feature_selection import mutual_info_regression
+# ------- Optional ML backend (scikit-learn preferred; fallback NumPy) -----
+SKLEARN_OK = True
+try:
+    from sklearn.linear_model import LinearRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.feature_selection import mutual_info_regression
+except Exception:
+    SKLEARN_OK = False
 
 st.set_page_config(page_title="Powertrain Emissions & Performance Analytics", layout="wide")
 
@@ -27,11 +31,11 @@ def percent(x): return f"{100.0*x:.1f}%"
 # Example limits (edit to your program)
 REG_LIMITS = {
     "BS VI": {"NOx": 0.46, "CO": 1.5, "HC": 0.13, "PM": 0.01},
-    "Euro VI": {"NOx": 0.4, "CO": 1.5, "HC": 0.13, "PM": 0.01},
+    "Euro VI": {"NOx": 0.4,  "CO": 1.5, "HC": 0.13, "PM": 0.01},
     "EPA 2010": {"NOx": 0.2/0.7457, "CO": 15.5/0.7457, "HC": 0.14/0.7457, "PM": 0.01/0.7457},
 }
 
-# ---------------- Sidebar: data ----------------
+# ------------------------------ Sidebar: data ------------------------------
 st.sidebar.title("Data & Setup")
 uploaded = st.sidebar.file_uploader("Upload raw CSV", type=["csv"])
 if uploaded:
@@ -61,7 +65,6 @@ else:
     })
 
 cols = list(df.columns)
-
 def _pick(label, default, key):
     options = ["<none>"] + cols
     if default in cols:
@@ -95,7 +98,7 @@ limits = REG_LIMITS[std_choice]
 st.title("Powertrain Emissions, Performance & Calibration Analytics")
 tabs = st.tabs(["🔎 Data Preview","✅ Compliance","⚙️ Performance","🔗 Correlation & RCA","📈 Trend & Stability","🧠 Optimization & Calibration","📊 Reporting"])
 
-# ------------- helper plotting wrappers -------------
+# -------------------- plotting wrappers (Plotly / Altair) --------------------
 def scatter(df, x, y, title):
     if PLOTLY_OK:
         return st.plotly_chart(px.scatter(df, x=x, y=y, title=title), use_container_width=True)
@@ -123,7 +126,43 @@ def heatmap_from_pivot(pivot, xname, yname, title):
     chart = alt.Chart(dfp).mark_rect().encode(x=xname, y=pivot.index.name, tooltip=["val"]).properties(title=title)
     st.altair_chart(chart, use_container_width=True)
 
-# ---------------- Tab 1: Data ----------------
+# ----------------------- analysis helpers (no sklearn) -----------------------
+def standardized_coefficients(df, feature_cols, target_col):
+    """
+    Returns:
+      coefs: pd.Series of standardized linear regression coefficients
+      mi:    pd.Series of mutual information (None if sklearn unavailable)
+    Uses scikit-learn if available; otherwise falls back to NumPy least squares.
+    """
+    data = df[feature_cols + [target_col]].dropna()
+    if len(data) <= 20:
+        return None, None
+    X = data[feature_cols].astype(float).values
+    y = data[target_col].astype(float).values
+
+    if SKLEARN_OK:
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+        lr = LinearRegression().fit(Xs, y)
+        coefs = pd.Series(lr.coef_, index=feature_cols)
+        # mutual info (nonlinear signal)
+        try:
+            mi = pd.Series(mutual_info_regression(Xs, y, random_state=0), index=feature_cols)
+        except Exception:
+            mi = None
+        return coefs, mi
+    else:
+        # Manual standardization + least squares
+        Xs = (X - X.mean(axis=0)) / (X.std(axis=0, ddof=1) + 1e-12)
+        Xs = np.nan_to_num(Xs, copy=False)
+        # add intercept
+        Xd = np.c_[np.ones(len(Xs)), Xs]
+        beta, *_ = np.linalg.lstsq(Xd, y, rcond=None)
+        coefs = pd.Series(beta[1:], index=feature_cols)  # skip intercept
+        mi = None
+        return coefs, mi
+
+# ------------------------------ Tab 1: Data ---------------------------------
 with tabs[0]:
     st.subheader("Uploaded Data")
     st.dataframe(df.head(200), use_container_width=True)
@@ -136,7 +175,7 @@ with tabs[0]:
         "Timestamp": time_col, "Batch": batch_col, "Test_ID": test_col
     })
 
-# ---------------- Tab 2: Compliance ----------------
+# ---------------------------- Tab 2: Compliance ------------------------------
 with tabs[1]:
     st.subheader("Compliance Analysis")
     chosen = [(p, c) for p, c in [("NOx", nox_col), ("CO", co_col), ("HC", hc_col), ("PM", pm_col)] if c]
@@ -149,31 +188,30 @@ with tabs[1]:
             if limit is None:
                 st.info(f"No limit set for {pname} under {std_choice}. Edit REG_LIMITS in app.")
                 continue
-            x = pd.to_numeric(df[pcol], errors="coerce")
-            valid = x.dropna()
-            passes = (valid <= limit).sum()
-            fails = (valid > limit).sum()
+            x = pd.to_numeric(df[pcol], errors="coerce").dropna()
+            passes = (x <= limit).sum(); fails = (x > limit).sum()
             rows.append({
                 "Pollutant": pname,
                 "Limit (g/kWh)": round(limit,4),
                 "Pass count": int(passes),
                 "Fail count": int(fails),
                 "Pass rate": f"{(passes/max(1,passes+fails))*100:.1f}%",
-                "Median headroom (g/kWh)": round((limit - valid).median(),4)
+                "Median headroom (g/kWh)": round((limit - x).median(),4)
             })
         out = pd.DataFrame(rows)
         st.dataframe(out, use_container_width=True)
         # distributions
-        box(pd.concat([pd.DataFrame({"Pollutant": p, "Value": pd.to_numeric(df[c], errors="coerce")}) for p,c in chosen], ignore_index=True),
-            "Pollutant","Value","Pollutant Distributions (g/kWh)")
+        long = pd.concat([pd.DataFrame({"Pollutant": p, "Value": pd.to_numeric(df[c], errors="coerce")}) for p,c in chosen], ignore_index=True).dropna()
+        box(long, "Pollutant","Value","Pollutant Distributions (g/kWh)")
 
-# ---------------- Tab 3: Performance ----------------
+# --------------------------- Tab 3: Performance ------------------------------
 with tabs[2]:
     st.subheader("Performance Analysis")
     if not (rpm_col and (trq_col or pwr_col)):
         st.warning("Map RPM and either Torque or Power.")
     else:
-        power_kW = pd.to_numeric(df[pwr_col], errors="coerce") if pwr_col else (pd.to_numeric(df[trq_col], errors="coerce")*pd.to_numeric(df[rpm_col], errors="coerce"))/9550.0
+        power_kW = (pd.to_numeric(df[pwr_col], errors="coerce") if pwr_col
+                    else (pd.to_numeric(df[trq_col], errors="coerce")*pd.to_numeric(df[rpm_col], errors="coerce"))/9550.0)
         scatter(pd.DataFrame({rpm_col: df[rpm_col], "Power_kW": power_kW}), rpm_col, "Power_kW", "Power vs RPM")
         if trq_col:
             scatter(df, rpm_col, trq_col, "Torque vs RPM")
@@ -186,7 +224,6 @@ with tabs[2]:
                 d["rpm_bin"] = pd.cut(pd.to_numeric(d[rpm_col], errors="coerce"), bins=Rbins)
                 d["trq_bin"] = pd.cut(pd.to_numeric(d[trq_col], errors="coerce"), bins=Tbins)
                 piv = d.groupby(["rpm_bin","trq_bin"])["BSFC"].mean().unstack()
-                # relabel to bin midpoints
                 piv.index.name = "RPM"; piv.columns.name = "Torque (Nm)"
                 piv.index = [0.5*(b.left+b.right) for b in piv.index]
                 piv.columns = [0.5*(b.left+b.right) for b in piv.columns]
@@ -196,7 +233,7 @@ with tabs[2]:
         else:
             st.info("Map Fuel flow to enable BSFC.")
 
-# ---------------- Tab 4: Correlation & RCA ----------------
+# ------------------------ Tab 4: Correlation & RCA ---------------------------
 with tabs[3]:
     st.subheader("Correlation & Root Cause")
     if nox_col and egt_col: scatter(df, egt_col, nox_col, "NOx vs EGT")
@@ -220,21 +257,17 @@ with tabs[3]:
         tcol = {"NOx": nox_col, "CO": co_col, "PM": pm_col}[drivers_target]
         feats = [c for c in [afr_col, egr_col, inj_col, egt_col, rpm_col, trq_col, pwr_col] if c]
         if len(feats) >= 2:
-            data = df[feats+[tcol]].dropna()
-            if len(data) > 20:
-                X = data[feats].astype(float).values; y = data[tcol].astype(float).values
-                Xs = StandardScaler().fit_transform(X); lr = LinearRegression().fit(Xs, y)
-                coefs = pd.Series(lr.coef_, index=feats).sort_values(key=np.abs, ascending=False)
-                st.dataframe(coefs.to_frame("coef").round(3))
-                try:
-                    mi = mutual_info_regression(Xs, y, random_state=0)
-                    st.dataframe(pd.Series(mi, index=feats).sort_values(ascending=False).to_frame("MI").round(3))
-                except Exception:
-                    pass
+            coefs, mi = standardized_coefficients(df, feats, tcol)
+            if coefs is not None:
+                st.write("**Coefficient (standardized)** — sign shows direction, magnitude shows influence")
+                st.dataframe(coefs.sort_values(key=np.abs, ascending=False).to_frame("coef").round(3))
+                if mi is not None:
+                    st.write("**Mutual Information (nonlinear influence)**")
+                    st.dataframe(mi.sort_values(ascending=False).to_frame("MI").round(3))
         else:
             st.info("Map at least two features among AFR/EGR/Injection timing/EGT/RPM/Torque/Power plus a target pollutant.")
 
-# ---------------- Tab 5: Trend & Stability ----------------
+# ------------------------ Tab 5: Trend & Stability ---------------------------
 with tabs[4]:
     st.subheader("Trend & Stability")
     if time_col and nox_col:
@@ -260,7 +293,9 @@ with tabs[4]:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=d[time_col], y=d[nox_col], mode="lines+markers", name="NOx"))
                 fig.add_hline(y=mean, line_dash="dash", annotation_text="Mean")
-                if sigma: fig.add_hline(y=UCL, line_dash="dot", annotation_text="UCL"); fig.add_hline(y=LCL, line_dash="dot", annotation_text="LCL")
+                if sigma:
+                    fig.add_hline(y=UCL, line_dash="dot", annotation_text="UCL")
+                    fig.add_hline(y=LCL, line_dash="dot", annotation_text="LCL")
                 fig.update_layout(title="Individuals Chart — NOx", xaxis_title="Time", yaxis_title="g/kWh")
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -274,20 +309,17 @@ with tabs[4]:
         else:
             st.info("Need at least 10 sequential points for a control chart.")
 
-# ---------------- Tab 6: Optimization & Calibration ----------------
+# ------------------ Tab 6: Optimization & Calibration -----------------------
 with tabs[5]:
     st.subheader("Optimization & Calibration Feedback")
     tips = []
     target_col = nox_col
     feats = [c for c in [afr_col, egr_col, inj_col, egt_col, rpm_col, trq_col] if c]
     if target_col and len(feats) >= 2:
-        data = df[feats + [target_col]].dropna()
-        if len(data) > 50:
-            X = data[feats].astype(float).values; y = data[target_col].astype(float).values
-            Xs = StandardScaler().fit_transform(X); lr = LinearRegression().fit(Xs, y)
-            coefs = pd.Series(lr.coef_, index=feats).sort_values(key=np.abs, ascending=False)
+        coefs, _ = standardized_coefficients(df, feats, target_col)
+        if coefs is not None:
             st.write("**NOx Driver Coefficients (standardized)**")
-            st.dataframe(coefs.to_frame("coef").round(3))
+            st.dataframe(coefs.sort_values(key=np.abs, ascending=False).to_frame("coef").round(3))
             def has(name): return name in coefs.index
             if has(afr_col) and coefs[afr_col] > 0: tips.append("NOx rises with leaner AFR — enrich slightly in high‑NOx cells.")
             if has(egr_col) and coefs[egr_col] < 0: tips.append("EGR appears effective — try modest EGR increases in hot zones.")
@@ -298,7 +330,7 @@ with tabs[5]:
             if pm_col: guards.append("watch PM; avoid smoke limit and maintain adequate rail/boost")
             if guards: tips.append("While reducing NOx, " + " and ".join(guards) + ".")
         else:
-            st.info("Need >50 valid rows for stronger driver suggestions.")
+            st.info("Need >20 valid rows for driver suggestions.")
     else:
         st.info("Map NOx and ≥2 of AFR/EGR/Injection timing/EGT/RPM/Torque for tips.")
 
@@ -317,7 +349,7 @@ with tabs[5]:
     if eff_rows: st.dataframe(pd.DataFrame(eff_rows), use_container_width=True)
     else: st.info("Map *_in and *_out columns to compute SCR/DPF/TWC efficiencies.")
 
-# ---------------- Tab 7: Reporting ----------------
+# --------------------------- Tab 7: Reporting --------------------------------
 with tabs[6]:
     st.subheader("Reporting & Visualization")
     pol_map = {"NOx": nox_col, "CO": co_col, "HC": hc_col, "PM": pm_col}
@@ -351,9 +383,8 @@ with tabs[6]:
                               yaxis2=dict(title="NOx (g/kWh)", overlaying="y", side="right"))
             st.plotly_chart(fig, use_container_width=True)
         else:
-            # Two-layer Altair: scale independent via transform
             p1 = alt.Chart(perf).mark_point().encode(x=rpm_col, y="Power_kW")
             p2 = alt.Chart(perf).mark_point().encode(x=rpm_col, y=alt.Y("NOx_gpkWh", axis=alt.Axis(titleColor="gray")))
             st.altair_chart(alt.layer(p1, p2).resolve_scale(y='independent').properties(title="Power vs RPM & NOx vs RPM"), use_container_width=True)
 
-st.caption("If Plotly is unavailable, charts auto‑fallback to Altair. For full features (LOWESS/OLS trendlines), keep Plotly + statsmodels installed.")
+st.caption("If Plotly or scikit‑learn aren’t available in your environment, the app auto‑falls back to Altair charts and NumPy-based regression.")
