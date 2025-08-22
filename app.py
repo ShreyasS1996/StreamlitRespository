@@ -2,23 +2,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ------- Optional viz backends (Plotly preferred; fallback Altair) -------
-PLOTLY_OK = True
+# ---------------- Visualization backends: Plotly -> Altair -> Builtin ----------------
+BACKEND = "plotly"
 try:
     import plotly.express as px
     import plotly.graph_objects as go
 except Exception:
-    PLOTLY_OK = False
-    import altair as alt
-
-# ------- Optional ML backend (scikit-learn preferred; fallback NumPy) -----
-SKLEARN_OK = True
-try:
-    from sklearn.linear_model import LinearRegression
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.feature_selection import mutual_info_regression
-except Exception:
-    SKLEARN_OK = False
+    try:
+        import altair as alt
+        BACKEND = "altair"
+    except Exception:
+        BACKEND = "builtin"  # last-resort: use st.*_chart
 
 st.set_page_config(page_title="Powertrain Emissions & Performance Analytics", layout="wide")
 
@@ -26,7 +20,8 @@ st.set_page_config(page_title="Powertrain Emissions & Performance Analytics", la
 def read_csv(file) -> pd.DataFrame:
     return pd.read_csv(file)
 
-def percent(x): return f"{100.0*x:.1f}%"
+def percent(x: float) -> str:
+    return f"{100.0*x:.1f}%"
 
 # Example limits (edit to your program)
 REG_LIMITS = {
@@ -41,12 +36,16 @@ uploaded = st.sidebar.file_uploader("Upload raw CSV", type=["csv"])
 if uploaded:
     df = read_csv(uploaded)
 else:
-    # tiny synthetic demo if no CSV
-    rng = np.random.default_rng(42); n = 1200
-    rpm = rng.integers(800, 4200, n); trq = rng.uniform(20, 320, n)
+    # synthetic demo data if no CSV uploaded
+    rng = np.random.default_rng(42)
+    n = 1200
+    rpm = rng.integers(800, 4200, n)
+    trq = rng.uniform(20, 320, n)
     pwr = (rpm * trq) / 9550.0
-    afr = rng.uniform(12, 20, n); egr = rng.uniform(0, 20, n)
-    inj = rng.uniform(-5, 10, n); egt = rng.uniform(180, 550, n)
+    afr = rng.uniform(12, 20, n)
+    egr = rng.uniform(0, 20, n)
+    inj = rng.uniform(-5, 10, n)  # +deg ATDC = retarded
+    egt = rng.uniform(180, 550, n)
     fuel = rng.uniform(0.2, 3.5, n)
     nox = 0.0008*(egt**1.1) + 0.02*(afr-14.7) - 0.01*egr + 0.002*inj + rng.normal(0,0.05,n)
     co  = 0.25 + 0.02*(14.7-afr) + 0.002*np.maximum(0,-inj) + rng.normal(0,0.03,n)
@@ -98,69 +97,67 @@ limits = REG_LIMITS[std_choice]
 st.title("Powertrain Emissions, Performance & Calibration Analytics")
 tabs = st.tabs(["🔎 Data Preview","✅ Compliance","⚙️ Performance","🔗 Correlation & RCA","📈 Trend & Stability","🧠 Optimization & Calibration","📊 Reporting"])
 
-# -------------------- plotting wrappers (Plotly / Altair) --------------------
-def scatter(df, x, y, title):
-    if PLOTLY_OK:
-        return st.plotly_chart(px.scatter(df, x=x, y=y, title=title), use_container_width=True)
-    chart = alt.Chart(df).mark_circle(opacity=0.6).encode(x=x, y=y).properties(title=title).interactive()
-    st.altair_chart(chart, use_container_width=True)
+# -------------------- plotting wrappers --------------------
+def scatter(df_, x, y, title):
+    if BACKEND == "plotly":
+        st.plotly_chart(px.scatter(df_, x=x, y=y, title=title), use_container_width=True)
+    elif BACKEND == "altair":
+        chart = alt.Chart(df_).mark_circle(opacity=0.6).encode(x=x, y=y).properties(title=title).interactive()
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        # builtin fallback
+        st.write(f"**{title}**")
+        st.scatter_chart(df_[[x, y]].rename(columns={x: "x", y: "y"}))
 
-def line(df, x, y, title):
-    if PLOTLY_OK:
-        return st.plotly_chart(px.line(df, x=x, y=y, title=title), use_container_width=True)
-    chart = alt.Chart(df).mark_line().encode(x=x, y=y).properties(title=title)
-    st.altair_chart(chart, use_container_width=True)
+def line(df_, x, y, title):
+    if BACKEND == "plotly":
+        st.plotly_chart(px.line(df_, x=x, y=y, title=title), use_container_width=True)
+    elif BACKEND == "altair":
+        chart = alt.Chart(df_).mark_line().encode(x=x, y=y).properties(title=title)
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.write(f"**{title}**")
+        st.line_chart(df_.set_index(x)[y])
 
 def box(df_long, x, y, title):
-    if PLOTLY_OK:
-        return st.plotly_chart(px.box(df_long, x=x, y=y, title=title), use_container_width=True)
-    chart = alt.Chart(df_long).mark_boxplot().encode(x=x, y=y).properties(title=title)
-    st.altair_chart(chart, use_container_width=True)
+    if BACKEND == "plotly":
+        st.plotly_chart(px.box(df_long, x=x, y=y, title=title), use_container_width=True)
+    elif BACKEND == "altair":
+        chart = alt.Chart(df_long).mark_boxplot().encode(x=x, y=y).properties(title=title)
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.write(f"**{title}** (table fallback)")
+        st.dataframe(df_long)
 
 def heatmap_from_pivot(pivot, xname, yname, title):
-    if PLOTLY_OK:
+    if BACKEND == "plotly":
         fig = go.Figure(data=go.Heatmap(x=pivot.columns, y=pivot.index, z=pivot.values, colorbar_title="Value"))
         fig.update_layout(xaxis_title=xname, yaxis_title=yname, title=title)
-        return st.plotly_chart(fig, use_container_width=True)
-    dfp = pivot.reset_index().melt(id_vars=pivot.index.name, var_name=xname, value_name="val")
-    chart = alt.Chart(dfp).mark_rect().encode(x=xname, y=pivot.index.name, tooltip=["val"]).properties(title=title)
-    st.altair_chart(chart, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+    elif BACKEND == "altair":
+        dfp = pivot.reset_index().melt(id_vars=pivot.index.name, var_name=xname, value_name="val")
+        chart = alt.Chart(dfp).mark_rect().encode(x=xname, y=pivot.index.name, color="val:Q", tooltip=["val"]).properties(title=title)
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.write(f"**{title}** (table fallback)")
+        st.dataframe(pivot)
 
-# ----------------------- analysis helpers (no sklearn) -----------------------
-def standardized_coefficients(df, feature_cols, target_col):
+# ----------------------- analysis helpers (NumPy regression) -----------------------
+def standardized_coefficients(df_, feature_cols, target_col):
     """
-    Returns:
-      coefs: pd.Series of standardized linear regression coefficients
-      mi:    pd.Series of mutual information (None if sklearn unavailable)
-    Uses scikit-learn if available; otherwise falls back to NumPy least squares.
+    Returns standardized linear regression coefficients using NumPy least squares.
     """
-    data = df[feature_cols + [target_col]].dropna()
+    data = df_[feature_cols + [target_col]].dropna()
     if len(data) <= 20:
-        return None, None
+        return None
     X = data[feature_cols].astype(float).values
     y = data[target_col].astype(float).values
-
-    if SKLEARN_OK:
-        scaler = StandardScaler()
-        Xs = scaler.fit_transform(X)
-        lr = LinearRegression().fit(Xs, y)
-        coefs = pd.Series(lr.coef_, index=feature_cols)
-        # mutual info (nonlinear signal)
-        try:
-            mi = pd.Series(mutual_info_regression(Xs, y, random_state=0), index=feature_cols)
-        except Exception:
-            mi = None
-        return coefs, mi
-    else:
-        # Manual standardization + least squares
-        Xs = (X - X.mean(axis=0)) / (X.std(axis=0, ddof=1) + 1e-12)
-        Xs = np.nan_to_num(Xs, copy=False)
-        # add intercept
-        Xd = np.c_[np.ones(len(Xs)), Xs]
-        beta, *_ = np.linalg.lstsq(Xd, y, rcond=None)
-        coefs = pd.Series(beta[1:], index=feature_cols)  # skip intercept
-        mi = None
-        return coefs, mi
+    Xs = (X - X.mean(axis=0)) / (X.std(axis=0, ddof=1) + 1e-12)
+    Xs = np.nan_to_num(Xs, copy=False)
+    Xd = np.c_[np.ones(len(Xs)), Xs]  # intercept
+    beta, *_ = np.linalg.lstsq(Xd, y, rcond=None)
+    coefs = pd.Series(beta[1:], index=feature_cols)  # skip intercept
+    return coefs
 
 # ------------------------------ Tab 1: Data ---------------------------------
 with tabs[0]:
@@ -200,7 +197,6 @@ with tabs[1]:
             })
         out = pd.DataFrame(rows)
         st.dataframe(out, use_container_width=True)
-        # distributions
         long = pd.concat([pd.DataFrame({"Pollutant": p, "Value": pd.to_numeric(df[c], errors="coerce")}) for p,c in chosen], ignore_index=True).dropna()
         box(long, "Pollutant","Value","Pollutant Distributions (g/kWh)")
 
@@ -243,12 +239,15 @@ with tabs[3]:
     num = df.select_dtypes(include=[np.number]).copy()
     if num.shape[1] >= 2:
         corr = num.corr(numeric_only=True).round(2)
-        if PLOTLY_OK:
+        if BACKEND == "plotly":
             st.plotly_chart(px.imshow(corr, text_auto=True, aspect="auto", title="Correlation Matrix"), use_container_width=True)
-        else:
+        elif BACKEND == "altair":
             corr_reset = corr.reset_index().melt("index")
             heat = alt.Chart(corr_reset).mark_rect().encode(x="index:O", y="variable:O", color="value:Q", tooltip=["index","variable","value"])
             st.altair_chart(heat.properties(title="Correlation Matrix"), use_container_width=True)
+        else:
+            st.write("**Correlation Matrix** (table fallback)")
+            st.dataframe(corr)
 
     st.markdown("**Key Drivers via Standardized Linear Regression**")
     targets = [p for p,c in [("NOx", nox_col), ("CO", co_col), ("PM", pm_col)] if c]
@@ -257,13 +256,10 @@ with tabs[3]:
         tcol = {"NOx": nox_col, "CO": co_col, "PM": pm_col}[drivers_target]
         feats = [c for c in [afr_col, egr_col, inj_col, egt_col, rpm_col, trq_col, pwr_col] if c]
         if len(feats) >= 2:
-            coefs, mi = standardized_coefficients(df, feats, tcol)
+            coefs = standardized_coefficients(df, feats, tcol)
             if coefs is not None:
                 st.write("**Coefficient (standardized)** — sign shows direction, magnitude shows influence")
                 st.dataframe(coefs.sort_values(key=np.abs, ascending=False).to_frame("coef").round(3))
-                if mi is not None:
-                    st.write("**Mutual Information (nonlinear influence)**")
-                    st.dataframe(mi.sort_values(ascending=False).to_frame("MI").round(3))
         else:
             st.info("Map at least two features among AFR/EGR/Injection timing/EGT/RPM/Torque/Power plus a target pollutant.")
 
@@ -274,10 +270,13 @@ with tabs[4]:
         d = df[[time_col, nox_col]].dropna().sort_values(time_col)
         line(d, time_col, nox_col, "NOx over Time")
     if batch_col and nox_col:
-        if PLOTLY_OK:
+        if BACKEND == "plotly":
             st.plotly_chart(px.box(df.dropna(subset=[batch_col, nox_col]), x=batch_col, y=nox_col, title="Batch-to-Batch Variation — NOx"), use_container_width=True)
-        else:
+        elif BACKEND == "altair":
             box(df.dropna(subset=[batch_col, nox_col])[[batch_col, nox_col]], batch_col, nox_col, "Batch-to-Batch Variation — NOx")
+        else:
+            st.write("**Batch-to-Batch Variation — NOx** (table fallback)")
+            st.dataframe(df.dropna(subset=[batch_col, nox_col])[[batch_col, nox_col]])
 
     st.markdown("**Individuals & Moving Range Control Chart (NOx)**")
     if time_col and nox_col:
@@ -289,7 +288,7 @@ with tabs[4]:
             sigma = mrbar/d2 if (mrbar and not np.isnan(mrbar)) else np.nan
             UCL = mean + 3*sigma if sigma else np.nan; LCL = mean - 3*sigma if sigma else np.nan
             d = d.assign(mean=mean, UCL=UCL, LCL=LCL)
-            if PLOTLY_OK:
+            if BACKEND == "plotly":
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=d[time_col], y=d[nox_col], mode="lines+markers", name="NOx"))
                 fig.add_hline(y=mean, line_dash="dash", annotation_text="Mean")
@@ -298,7 +297,7 @@ with tabs[4]:
                     fig.add_hline(y=LCL, line_dash="dot", annotation_text="LCL")
                 fig.update_layout(title="Individuals Chart — NOx", xaxis_title="Time", yaxis_title="g/kWh")
                 st.plotly_chart(fig, use_container_width=True)
-            else:
+            elif BACKEND == "altair":
                 base = alt.Chart(d).encode(x=time_col)
                 st.altair_chart((base.mark_line().encode(y=nox_col) +
                                  base.mark_rule(strokeDash=[4,4]).encode(y="mean:Q") +
@@ -306,6 +305,10 @@ with tabs[4]:
                                  (base.mark_rule(strokeDash=[2,2]).encode(y="LCL:Q") if sigma else alt.Chart())
                                  ).properties(title="Individuals Chart — NOx"),
                                 use_container_width=True)
+            else:
+                st.write("**Individuals Chart — NOx**")
+                st.line_chart(d.set_index(time_col)[nox_col])
+                st.write(f"Mean: {mean:.3f}  |  UCL: {UCL if isinstance(UCL,float) else '—'}  |  LCL: {LCL if isinstance(LCL,float) else '—'}")
         else:
             st.info("Need at least 10 sequential points for a control chart.")
 
@@ -316,7 +319,7 @@ with tabs[5]:
     target_col = nox_col
     feats = [c for c in [afr_col, egr_col, inj_col, egt_col, rpm_col, trq_col] if c]
     if target_col and len(feats) >= 2:
-        coefs, _ = standardized_coefficients(df, feats, target_col)
+        coefs = standardized_coefficients(df, feats, target_col)
         if coefs is not None:
             st.write("**NOx Driver Coefficients (standardized)**")
             st.dataframe(coefs.sort_values(key=np.abs, ascending=False).to_frame("coef").round(3))
@@ -374,7 +377,7 @@ with tabs[6]:
         perf["Power_kW"] = (pd.to_numeric(df[trq_col], errors="coerce")*pd.to_numeric(df[rpm_col], errors="coerce"))/9550.0 if trq_col and not pwr_col else pd.to_numeric(df[pwr_col], errors="coerce")
         perf["NOx_gpkWh"] = pd.to_numeric(df[nox_col], errors="coerce")
         perf = perf.dropna()
-        if PLOTLY_OK:
+        if BACKEND == "plotly":
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=perf[rpm_col], y=perf["Power_kW"], mode="markers", name="Power (kW)", yaxis="y1"))
             fig.add_trace(go.Scatter(x=perf[rpm_col], y=perf["NOx_gpkWh"], mode="markers", name="NOx (g/kWh)", yaxis="y2"))
@@ -382,9 +385,16 @@ with tabs[6]:
                               yaxis=dict(title="Power (kW)", side="left"),
                               yaxis2=dict(title="NOx (g/kWh)", overlaying="y", side="right"))
             st.plotly_chart(fig, use_container_width=True)
-        else:
+        elif BACKEND == "altair":
             p1 = alt.Chart(perf).mark_point().encode(x=rpm_col, y="Power_kW")
             p2 = alt.Chart(perf).mark_point().encode(x=rpm_col, y=alt.Y("NOx_gpkWh", axis=alt.Axis(titleColor="gray")))
             st.altair_chart(alt.layer(p1, p2).resolve_scale(y='independent').properties(title="Power vs RPM & NOx vs RPM"), use_container_width=True)
+        else:
+            st.write("**Power vs RPM (left) & NOx vs RPM (right)**")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.scatter_chart(perf[[rpm_col, "Power_kW"]].rename(columns={rpm_col: "x", "Power_kW": "y"}))
+            with col2:
+                st.scatter_chart(perf[[rpm_col, "NOx_gpkWh"]].rename(columns={rpm_col: "x", "NOx_gpkWh": "y"}))
 
-st.caption("If Plotly or scikit‑learn aren’t available in your environment, the app auto‑falls back to Altair charts and NumPy-based regression.")
+st.caption("App is hardened for cloud deploys: if Plotly/Altair aren’t available, it falls back to Streamlit built‑ins; regression uses NumPy.")
